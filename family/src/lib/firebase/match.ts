@@ -1,63 +1,53 @@
-import { db } from "./config";
+// src/lib/firebase/match.ts
+import { db, auth } from "./config";
 import { 
-  collection, 
-  query, 
-  where, 
-  getDocs, 
-  runTransaction, 
-  doc, 
-  setDoc, 
-  serverTimestamp 
+  collection, query, where, getDocs, 
+  doc, updateDoc, runTransaction, serverTimestamp 
 } from "firebase/firestore";
 
-/**
- * Generates a unique 6-character alphanumeric code
- */
-export const generateInviteCode = () => {
-  return Math.random().toString(36).substring(2, 8).toUpperCase();
-};
-
-/**
- * Creates an invite record for the user manually (used in Match page)
- */
-export const createInvite = async (uid: string, role: string) => {
-  const code = generateInviteCode();
-  const inviteRef = doc(db, "invites", code);
-  
-  await setDoc(inviteRef, {
-    creatorId: uid,
-    creatorRole: role,
-    createdAt: serverTimestamp(),
-  });
-  
-  return code;
-};
-
-/**
- * Links two users together by verifying an invite code
- */
-export const joinFamily = async (partnerCode: string, currentUid: string) => {
+export const sendLinkRequest = async (targetCode: string, senderUid: string) => {
   const usersRef = collection(db, "users");
-  const q = query(usersRef, where("inviteCode", "==", partnerCode));
+  const q = query(usersRef, where("inviteCode", "==", targetCode));
   const querySnapshot = await getDocs(q);
 
-  if (querySnapshot.empty) {
-    throw new Error("Invalid code. Please check with your partner.");
+  if (querySnapshot.empty) throw new Error("Invite code not found.");
+  
+  const targetDoc = querySnapshot.docs[0];
+  const targetUid = targetDoc.id;
+
+  if (targetUid === senderUid) throw new Error("You cannot link with yourself.");
+
+  const targetUserRef = doc(db, "users", targetUid);
+  await updateDoc(targetUserRef, {
+    pendingInvite: {
+      fromUid: senderUid,
+      fromName: auth.currentUser?.displayName || "Partner",
+      status: "pending"
+    }
+  });
+  return true;
+};
+
+export const respondToInvite = async (accept: boolean) => {
+  const currentUser = auth.currentUser;
+  if (!currentUser) return;
+
+  const receiverRef = doc(db, "users", currentUser.uid);
+  const userSnap = await getDocs(query(collection(db, "users"), where("uid", "==", currentUser.uid)));
+  const pendingData = userSnap.docs[0].data().pendingInvite;
+
+  if (!pendingData) return;
+
+  if (!accept) {
+    await updateDoc(receiverRef, { pendingInvite: null });
+    return;
   }
 
-  const partnerDoc = querySnapshot.docs[0];
-  const partnerUid = partnerDoc.id;
-
-  if (partnerUid === currentUid) {
-    throw new Error("You cannot match with yourself.");
-  }
-
-  const currentUserRef = doc(db, "users", currentUid);
-  const partnerUserRef = doc(db, "users", partnerUid);
+  const senderRef = doc(db, "users", pendingData.fromUid);
 
   return await runTransaction(db, async (transaction) => {
-    transaction.update(currentUserRef, { partnerId: partnerUid });
-    transaction.update(partnerUserRef, { partnerId: currentUid });
+    transaction.update(receiverRef, { partnerId: pendingData.fromUid, pendingInvite: null });
+    transaction.update(senderRef, { partnerId: currentUser.uid });
     return true;
   });
 };
